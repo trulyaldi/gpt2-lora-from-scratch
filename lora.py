@@ -8,6 +8,7 @@ TARGETS = ('attn.c_attn', 'attn.c_proj', 'mlp.c_fc', 'mlp.c_proj')
 
 
 class LoRALinear(nn.Module):
+    """Frozen nn.Linear plus a trainable low-rank update (alpha/rank) * B @ A."""
     def __init__(self, base, rank, alpha, dropout=0.0):
         super().__init__()
         if not isinstance(base, nn.Linear) or rank <= 0 or alpha <= 0 or not 0 <= dropout < 1:
@@ -26,11 +27,13 @@ class LoRALinear(nn.Module):
 
     @torch.no_grad()
     def merge(self):
+        """Fold the low-rank update into the base weight and return the plain nn.Linear."""
         self.base.weight.add_((self.lora_B @ self.lora_A) * self.scaling)
         return self.base
 
 
 def apply_lora(model, rank=8, alpha=16, dropout=0.0, targets=TARGETS):
+    """Freeze the model and wrap every nn.Linear whose name ends with a target; return wrapped names."""
     model.requires_grad_(False)
     matched = []
     for name, module in list(model.named_modules()):
@@ -45,6 +48,7 @@ def apply_lora(model, rank=8, alpha=16, dropout=0.0, targets=TARGETS):
 
 
 def merge_lora(model):
+    """Replace every LoRALinear in the model with its merged nn.Linear."""
     for name, module in list(model.named_modules()):
         if isinstance(module, LoRALinear):
             parent_name, attr = name.rsplit('.', 1)
@@ -53,17 +57,20 @@ def merge_lora(model):
 
 
 def adapter_state_dict(model):
+    """Only the LoRA A and B tensors, on CPU."""
     return {name: value.detach().cpu().clone() for name, value in model.state_dict().items()
             if name.endswith(('.lora_A', '.lora_B'))}
 
 
 def save_adapter(model, path):
+    """Save adapter tensors and per-module rank/alpha/dropout (no base weights)."""
     modules = {name: {'rank': m.rank, 'alpha': m.alpha, 'dropout': m.dropout.p}
                for name, m in model.named_modules() if isinstance(m, LoRALinear)}
     torch.save({'modules': modules, 'weights': adapter_state_dict(model)}, path)
 
 
 def load_adapter(model, path):
+    """Load an adapter into a model already wrapped with the same LoRA configuration."""
     package = torch.load(path, map_location='cpu', weights_only=True)
     for name, cfg in package['modules'].items():
         module = model.get_submodule(name)

@@ -1,3 +1,5 @@
+"""PyTorch port vs NumPy model on identical float64 weights: logits, attention output, loss,
+every parameter gradient, and causality."""
 import pytest
 
 torch = pytest.importorskip('torch')

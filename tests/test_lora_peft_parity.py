@@ -1,3 +1,5 @@
+"""Custom LoRA vs Hugging Face PEFT on identical weights: parameter counts, outputs, loss,
+gradients, one SGD step and merged weights must agree in float64."""
 import copy
 import pytest
 

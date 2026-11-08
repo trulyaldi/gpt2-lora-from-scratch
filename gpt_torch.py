@@ -10,6 +10,7 @@ from torch.nn import functional as F
 
 @dataclass(frozen=True)
 class GPTConfig:
+    """Model sizes; defaults are GPT-2 small."""
     vocab_size: int = 50257
     block_size: int = 1024
     n_layer: int = 12
@@ -18,6 +19,7 @@ class GPTConfig:
 
 
 class Attention(nn.Module):
+    """Multi-head causal self-attention with an explicit mask (no fused kernel)."""
     def __init__(self, config):
         super().__init__()
         c = config.n_embd
@@ -40,6 +42,7 @@ class Attention(nn.Module):
 
 
 class MLP(nn.Module):
+    """Linear(C, 4C) -> tanh-GELU -> Linear(4C, C)."""
     def __init__(self, config):
         super().__init__()
         self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd)
@@ -50,6 +53,7 @@ class MLP(nn.Module):
 
 
 class Block(nn.Module):
+    """Pre-LayerNorm transformer block."""
     def __init__(self, config):
         super().__init__()
         self.ln_1 = nn.LayerNorm(config.n_embd, eps=1e-5)
@@ -63,6 +67,7 @@ class Block(nn.Module):
 
 
 class GPT(nn.Module):
+    """GPT-2 with a tied output head; forward returns logits, or (logits, loss) given targets."""
     def __init__(self, config=GPTConfig()):
         super().__init__()
         self.config = config
@@ -94,18 +99,6 @@ class GPT(nn.Module):
             return logits
         loss = F.cross_entropy(logits.reshape(-1, logits.shape[-1]), targets.reshape(-1))
         return logits, loss
-
-    @torch.no_grad()
-    def generate(self, idx, max_new, temperature=1.0, top_k=50):
-        if temperature <= 0:
-            raise ValueError('temperature must be positive')
-        for _ in range(max_new):
-            logits = self(idx[:, -self.config.block_size:])[:, -1, :] / temperature
-            if top_k:
-                cutoff = logits.topk(min(top_k, logits.shape[-1])).values[:, -1:]
-                logits = logits.masked_fill(logits < cutoff, -torch.inf)
-            idx = torch.cat((idx, torch.multinomial(logits.softmax(-1), 1)), dim=1)
-        return idx
 
 
 def copy_from_numpy(torch_model, numpy_model):

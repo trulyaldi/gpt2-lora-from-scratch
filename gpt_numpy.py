@@ -1,5 +1,8 @@
-"""GPT-2 small in pure NumPy: every layer with a hand-written backward pass,
-plus a loader for OpenAI's pretrained weights. Built in notebooks 01-05; notebook 06 imports it."""
+"""GPT-2 small in pure NumPy: every layer with a handwritten backward pass, AdamW,
+sampling, and a loader for OpenAI's pretrained weights.
+
+Each layer has forward(x), backward(dout) -> dx (accumulating into .grads), and
+parameters(prefix) -> [(name, param, grad)]. Linear weights are stored (in, out)."""
 import math
 import numpy as np
 
@@ -21,11 +24,13 @@ def numerical_grad(f, x, eps=1e-6):
 
 
 def rel_error(a, b):
+    """Relative error |a-b| / (|a|+|b|) used by the gradient checks."""
     return np.linalg.norm(a - b) / max(1e-12, np.linalg.norm(a) + np.linalg.norm(b))
 
 
 # ---------------------------------------------------------------- layers
 class Linear:
+    """y = x @ W + b with W stored (in, out); backward accumulates dW, db and returns dx."""
     def __init__(self, in_f, out_f, bias=True, std=0.02, rng=None, dtype=np.float64):
         rng = rng if rng is not None else np.random.default_rng()
         self.params = {"W": rng.normal(0.0, std, (in_f, out_f)).astype(dtype)}
@@ -54,6 +59,7 @@ class Linear:
 
 
 class GELU:
+    """GELU, tanh approximation (as in GPT-2)."""
     C = math.sqrt(2.0 / math.pi)        # Python float: keeps float32 arrays float32
 
     def forward(self, x):
@@ -71,6 +77,7 @@ class GELU:
 
 
 class MLP:
+    """Feed-forward sub-layer: Linear(C, 4C) -> GELU -> Linear(4C, C)."""
     def __init__(self, C, n_layer, rng, dtype=np.float64):
         self.c_fc = Linear(C, 4 * C, rng=rng, dtype=dtype)
         self.gelu = GELU()
@@ -87,6 +94,7 @@ class MLP:
 
 
 class Softmax:
+    """Softmax over the last axis; caches its output for backward."""
     def forward(self, x):
         z = x - x.max(axis=-1, keepdims=True)
         e = np.exp(z)
@@ -99,6 +107,7 @@ class Softmax:
 
 
 class CrossEntropyLoss:
+    """Mean token cross-entropy over (B, T, V) logits, fused with softmax."""
     def forward(self, logits, targets):
         B, T, V = logits.shape
         N = B * T
@@ -121,6 +130,7 @@ class CrossEntropyLoss:
 
 
 class LayerNorm:
+    """LayerNorm over the last axis with gain g and shift b (eps 1e-5)."""
     def __init__(self, C, eps=1e-5, dtype=np.float64):
         self.eps = eps
         self.params = {"g": np.ones(C, dtype=dtype), "b": np.zeros(C, dtype=dtype)}
@@ -147,6 +157,7 @@ class LayerNorm:
 
 
 class CausalSelfAttention:
+    """Multi-head causal self-attention with a fused q/k/v projection."""
     def __init__(self, C, n_head, n_layer, rng, dtype=np.float64):
         assert C % n_head == 0
         self.C, self.H = C, n_head
@@ -191,6 +202,7 @@ class CausalSelfAttention:
 
 
 class Embedding:
+    """Lookup table; backward scatter-adds so repeated indices accumulate."""
     def __init__(self, num, C, std=0.02, rng=None, dtype=np.float64):
         rng = rng if rng is not None else np.random.default_rng()
         self.params = {"W": rng.normal(0.0, std, (num, C)).astype(dtype)}
@@ -208,6 +220,7 @@ class Embedding:
 
 
 class Block:
+    """Pre-LayerNorm transformer block: x + attn(ln_1(x)), then x + mlp(ln_2(x))."""
     def __init__(self, C, n_head, n_layer, rng, dtype=np.float64):
         self.ln_1 = LayerNorm(C, dtype=dtype)
         self.attn = CausalSelfAttention(C, n_head, n_layer, rng, dtype=dtype)
@@ -230,6 +243,7 @@ class Block:
 
 
 class GPT:
+    """GPT-2 with a tied output head. Defaults are GPT-2 small (124M parameters)."""
     def __init__(self, vocab_size=50257, block_size=1024, n_layer=12, n_head=12, n_embd=768,
                  seed=0, dtype=np.float64):
         rng = np.random.default_rng(seed)
@@ -267,6 +281,7 @@ class GPT:
         return ps + self.ln_f.parameters("ln_f.")
 
     def zero_grad(self):
+        """Set every gradient to zero in place."""
         for _, _, g in self.parameters():
             g.fill(0.0)
 
@@ -286,17 +301,10 @@ class GPT:
             idx = np.concatenate([idx, nxt], axis=1)
         return idx
 
-    def save(self, path):
-        np.savez(path, **{n: p for n, p, _ in self.parameters()})
-
-    def load(self, path):
-        with np.load(path) as f:
-            for n, p, _ in self.parameters():
-                p[...] = f[n]
-
 
 # ---------------------------------------------------------------- training utilities
 class AdamW:
+    """AdamW with decoupled weight decay applied to 2-D parameters only."""
     def __init__(self, params, lr=6e-4, betas=(0.9, 0.95), eps=1e-8, weight_decay=0.1):
         self.params = params                     # list of (name, param, grad) from model.parameters()
         self.lr, self.b1, self.b2, self.eps, self.wd = lr, *betas, eps, weight_decay
@@ -317,6 +325,7 @@ class AdamW:
 
 
 def clip_grad_norm(params, max_norm=1.0):
+    """Scale all gradients in place so their global L2 norm is at most max_norm; return the norm."""
     norm = math.sqrt(sum(float((g * g).sum()) for _, _, g in params))
     if norm > max_norm:
         scale = max_norm / (norm + 1e-6)
