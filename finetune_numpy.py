@@ -44,6 +44,7 @@ def validation_loss(model, val, length, n_windows):
 
 
 def main():
+    """Load pretrained GPT-2 into the NumPy model, fine-tune, evaluate, sample, and save results."""
     args = parse_args()
     rng = np.random.default_rng(args.seed)
     train, val, _ = load_shakespeare()
