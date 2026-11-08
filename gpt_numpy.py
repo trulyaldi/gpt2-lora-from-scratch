@@ -4,7 +4,7 @@ import math
 import numpy as np
 
 
-# ---------------------------------------------------------------- helpers
+# ---------------------------------------------------------------- gradient-check helpers
 def numerical_grad(f, x, eps=1e-6):
     """Central-difference gradient of scalar f() w.r.t. array x (perturbed in place)."""
     grad = np.zeros_like(x, dtype=np.float64)
@@ -269,6 +269,70 @@ class GPT:
     def zero_grad(self):
         for _, _, g in self.parameters():
             g.fill(0.0)
+
+    def generate(self, idx, max_new, temperature=1.0, top_k=50, rng=None):
+        """Autoregressive sampling. idx: (B, T) int array of prompt tokens."""
+        rng = rng if rng is not None else np.random.default_rng()
+        for _ in range(max_new):
+            # float64 so the probabilities sum to 1 precisely enough for rng.choice
+            logits = self.forward(idx[:, -self.block_size:])[:, -1, :].astype(np.float64) / temperature
+            if top_k:
+                k = min(top_k, logits.shape[-1])
+                kth = np.sort(logits, axis=-1)[:, [-k]]
+                logits = np.where(logits < kth, -np.inf, logits)
+            p = np.exp(logits - logits.max(axis=-1, keepdims=True))
+            p /= p.sum(axis=-1, keepdims=True)
+            nxt = np.array([[rng.choice(len(pi), p=pi)] for pi in p])
+            idx = np.concatenate([idx, nxt], axis=1)
+        return idx
+
+    def save(self, path):
+        np.savez(path, **{n: p for n, p, _ in self.parameters()})
+
+    def load(self, path):
+        with np.load(path) as f:
+            for n, p, _ in self.parameters():
+                p[...] = f[n]
+
+
+# ---------------------------------------------------------------- training utilities
+class AdamW:
+    def __init__(self, params, lr=6e-4, betas=(0.9, 0.95), eps=1e-8, weight_decay=0.1):
+        self.params = params                     # list of (name, param, grad) from model.parameters()
+        self.lr, self.b1, self.b2, self.eps, self.wd = lr, *betas, eps, weight_decay
+        self.m = [np.zeros_like(p) for _, p, _ in params]
+        self.v = [np.zeros_like(p) for _, p, _ in params]
+        self.t = 0
+
+    def step(self):
+        """All updates are in place, so the model's arrays actually change."""
+        self.t += 1
+        c1, c2 = 1 - self.b1**self.t, 1 - self.b2**self.t
+        for (_, p, g), m, v in zip(self.params, self.m, self.v):
+            m *= self.b1; m += (1 - self.b1) * g
+            v *= self.b2; v += (1 - self.b2) * g * g
+            if p.ndim >= 2:                      # decay W and embeddings only, not biases/LN
+                p -= self.lr * self.wd * p
+            p -= self.lr * (m / c1) / (np.sqrt(v / c2) + self.eps)
+
+
+def clip_grad_norm(params, max_norm=1.0):
+    norm = math.sqrt(sum(float((g * g).sum()) for _, _, g in params))
+    if norm > max_norm:
+        scale = max_norm / (norm + 1e-6)
+        for _, _, g in params:
+            g *= scale
+    return norm
+
+
+def get_lr(step, max_lr=6e-4, min_lr=6e-5, warmup=100, max_steps=2000):
+    """Linear warmup, then cosine decay to min_lr. In the loop: opt.lr = get_lr(step)."""
+    if step < warmup:
+        return max_lr * (step + 1) / warmup
+    if step >= max_steps:
+        return min_lr
+    r = (step - warmup) / (max_steps - warmup)
+    return min_lr + 0.5 * (1 + math.cos(math.pi * r)) * (max_lr - min_lr)
 
 
 # ---------------------------------------------------------------- pretrained weights

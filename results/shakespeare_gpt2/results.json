@@ -1,0 +1,209 @@
+{
+  "config": {
+    "steps": 300,
+    "batch_size": 4,
+    "sequence_length": 256,
+    "eval_every": 50,
+    "warmup_steps": 20,
+    "timing_skip": 10,
+    "lr_full": 3e-05,
+    "lr_lora": 0.001,
+    "weight_decay": 0.01,
+    "rank": 8,
+    "alpha": 16,
+    "dropout": 0.0,
+    "seed": 1337,
+    "data": "data/tinyshakespeare.txt",
+    "output": "results/shakespeare_gpt2"
+  },
+  "data": {
+    "name": "Tiny Shakespeare",
+    "url": "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt",
+    "characters": 1115394,
+    "tokenizer": "GPT-2 BPE (tiktoken)",
+    "train_tokens": 304222,
+    "validation_tokens": 33803,
+    "split": "contiguous 90/10 by token"
+  },
+  "model": {
+    "name": "GPT-2 small (124M)",
+    "weights": "huggingface.co/openai-community/gpt2 model.safetensors"
+  },
+  "determinism": "torch.use_deterministic_algorithms(True), CUBLAS_WORKSPACE_CONFIG=:4096:8",
+  "hardware": {
+    "python": "3.12.3",
+    "torch": "2.15.0+cu132",
+    "torch_cuda": "13.2",
+    "peft": "0.21.2",
+    "os": "Linux-6.18.54.1-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+    "wsl2": true,
+    "cpu": "AMD Ryzen 5 5600H with Radeon Graphics",
+    "cpu_logical_cores": 12,
+    "ram_gib": 6.7,
+    "gpu": "NVIDIA GeForce RTX 3050 Ti Laptop GPU",
+    "gpu_memory_mib": 4096,
+    "gpu_compute_capability": "8.6",
+    "nvidia_driver": "610.47"
+  },
+  "results": {
+    "full": {
+      "arm": "full",
+      "learning_rate": 3e-05,
+      "lora_targets": null,
+      "trainable_parameters": 124439808,
+      "total_parameters": 124439808,
+      "trainable_percent": 100.0,
+      "peak_gpu_memory_allocated_mib": 2745.5517578125,
+      "peak_gpu_memory_reserved_mib": 3076.0,
+      "time_per_step_median_ms": 328.1222750000552,
+      "time_per_step_p10_ms": 324.38344600018354,
+      "time_per_step_p90_ms": 331.4666109999962,
+      "timed_steps": 290,
+      "train_tokens_per_second_median": 3120.787822161198,
+      "wall_seconds_including_eval": 117.17369957100004,
+      "initial_validation_loss": 4.326697913083163,
+      "final_validation_loss": 3.379851146177812,
+      "final_validation_perplexity": 29.366399487123317,
+      "history": [
+        {
+          "step": 0,
+          "validation_loss": 4.326697913083163
+        },
+        {
+          "step": 50,
+          "validation_loss": 3.5136733560851128,
+          "train_loss_window_mean": 3.8785091733932493
+        },
+        {
+          "step": 100,
+          "validation_loss": 3.452234954544992,
+          "train_loss_window_mean": 3.550162491798401
+        },
+        {
+          "step": 150,
+          "validation_loss": 3.41565642934857,
+          "train_loss_window_mean": 3.4533212423324584
+        },
+        {
+          "step": 200,
+          "validation_loss": 3.396370049678918,
+          "train_loss_window_mean": 3.4333171796798707
+        },
+        {
+          "step": 250,
+          "validation_loss": 3.3883822036511972,
+          "train_loss_window_mean": 3.346200075149536
+        },
+        {
+          "step": 300,
+          "validation_loss": 3.379851146177812,
+          "train_loss_window_mean": 3.3516607761383055
+        }
+      ]
+    },
+    "lora": {
+      "arm": "lora",
+      "learning_rate": 0.001,
+      "lora_targets": [
+        "h.0.attn.c_attn",
+        "h.0.attn.c_proj",
+        "h.0.mlp.c_fc",
+        "h.0.mlp.c_proj",
+        "h.1.attn.c_attn",
+        "h.1.attn.c_proj",
+        "h.1.mlp.c_fc",
+        "h.1.mlp.c_proj",
+        "h.2.attn.c_attn",
+        "h.2.attn.c_proj",
+        "h.2.mlp.c_fc",
+        "h.2.mlp.c_proj",
+        "h.3.attn.c_attn",
+        "h.3.attn.c_proj",
+        "h.3.mlp.c_fc",
+        "h.3.mlp.c_proj",
+        "h.4.attn.c_attn",
+        "h.4.attn.c_proj",
+        "h.4.mlp.c_fc",
+        "h.4.mlp.c_proj",
+        "h.5.attn.c_attn",
+        "h.5.attn.c_proj",
+        "h.5.mlp.c_fc",
+        "h.5.mlp.c_proj",
+        "h.6.attn.c_attn",
+        "h.6.attn.c_proj",
+        "h.6.mlp.c_fc",
+        "h.6.mlp.c_proj",
+        "h.7.attn.c_attn",
+        "h.7.attn.c_proj",
+        "h.7.mlp.c_fc",
+        "h.7.mlp.c_proj",
+        "h.8.attn.c_attn",
+        "h.8.attn.c_proj",
+        "h.8.mlp.c_fc",
+        "h.8.mlp.c_proj",
+        "h.9.attn.c_attn",
+        "h.9.attn.c_proj",
+        "h.9.mlp.c_fc",
+        "h.9.mlp.c_proj",
+        "h.10.attn.c_attn",
+        "h.10.attn.c_proj",
+        "h.10.mlp.c_fc",
+        "h.10.mlp.c_proj",
+        "h.11.attn.c_attn",
+        "h.11.attn.c_proj",
+        "h.11.mlp.c_fc",
+        "h.11.mlp.c_proj"
+      ],
+      "trainable_parameters": 1179648,
+      "total_parameters": 125619456,
+      "trainable_percent": 0.939064725769868,
+      "peak_gpu_memory_allocated_mib": 1800.3662109375,
+      "peak_gpu_memory_reserved_mib": 1926.0,
+      "time_per_step_median_ms": 221.75338500005637,
+      "time_per_step_p10_ms": 220.91074299987667,
+      "time_per_step_p90_ms": 222.73322599994572,
+      "timed_steps": 290,
+      "train_tokens_per_second_median": 4617.742362759152,
+      "wall_seconds_including_eval": 87.8032600460001,
+      "initial_validation_loss": 4.326697913083163,
+      "final_validation_loss": 3.41305846156496,
+      "final_validation_perplexity": 30.357951043523233,
+      "history": [
+        {
+          "step": 0,
+          "validation_loss": 4.326697913083163
+        },
+        {
+          "step": 50,
+          "validation_loss": 3.5363881154493852,
+          "train_loss_window_mean": 3.9129449987411498
+        },
+        {
+          "step": 100,
+          "validation_loss": 3.466468319748387,
+          "train_loss_window_mean": 3.595423312187195
+        },
+        {
+          "step": 150,
+          "validation_loss": 3.4431522109291772,
+          "train_loss_window_mean": 3.515643248558044
+        },
+        {
+          "step": 200,
+          "validation_loss": 3.426766417243264,
+          "train_loss_window_mean": 3.5081518507003784
+        },
+        {
+          "step": 250,
+          "validation_loss": 3.4174970352288447,
+          "train_loss_window_mean": 3.4320530319213867
+        },
+        {
+          "step": 300,
+          "validation_loss": 3.41305846156496,
+          "train_loss_window_mean": 3.442764735221863
+        }
+      ]
+    }
+  }
+}
