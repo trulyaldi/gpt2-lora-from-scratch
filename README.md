@@ -1,90 +1,88 @@
-# GPT-2 from NumPy to PyTorch, with LoRA
+# GPT-2 from scratch: NumPy, PyTorch and LoRA
 
-The original [gpt_numpy.py](gpt_numpy.py) and notebooks `00`–`06` teach GPT-2 small layer by layer, including handwritten backward passes. They remain intact. `gpt_torch.py` ports the same architecture to PyTorch; `lora.py` implements adapters; `benchmark.py` runs paired training experiments.
+I wrote GPT-2 small (124M parameters) in plain NumPy, with every backward pass derived by hand, to understand exactly what a transformer computes during training. I then ported it to PyTorch, checked the port against the NumPy version, and wrote LoRA from scratch and checked it against Hugging Face PEFT. Finally, I measured what LoRA actually saves compared with full fine-tuning when adapting pretrained GPT-2 to Tiny Shakespeare.
 
-## Architecture and numerical port
+## What is verified, and how
 
-The NumPy model has learned token and positional embeddings, pre-layer normalization transformer blocks, masked multi-head causal attention, a fourfold MLP with tanh-approximate GELU, and a final layer normalization. The output head uses the token embedding matrix transposed, so its parameters are tied. Defaults are GPT-2 small: vocabulary 50,257; context 1,024; 12 layers; 12 heads; width 768. Every linear weight is initialized from N(0, 0.02²), except residual projections, whose standard deviation is `0.02/sqrt(2*n_layer)`. Biases start at zero; layer normalization gains start at one and use epsilon 1e-5.
+All checks are pytest tests in `tests/` (19 tests).
 
-NumPy stores linear weights `(in, out)` and computes `x @ W`; PyTorch `nn.Linear` stores `(out, in)`. `copy_from_numpy` transposes these weights. PyTorch uses `nn.LayerNorm`, `torch.softmax`, and `F.gelu(..., approximate='tanh')`. Floating point reduction order and the backend GELU implementation can produce small numerical differences. The port uses an explicit causal mask and does not use flash attention, to make the attention math inspectable.
+**Handwritten gradients** (`test_gradcheck.py`). Each NumPy layer is compared with central finite differences in float64. That covers Linear, GELU, MLP, softmax, cross-entropy, LayerNorm, attention, embedding and the transformer block, plus every parameter of a small 2-layer GPT, including the tied output head. Every gradient entry is checked, and the relative error must be below 1e-7; the worst measured is 4.8e-9. One full-width GPT-2 small block (768 wide, 12 heads) is spot-checked on sampled entries with a 1e-6 threshold; the worst measured is 8.3e-8. The same file checks that attention is causal and that the initial loss of GPT-2 small is within 0.25 of the expected ln(50257) + 768·0.02²/2 ≈ 10.98. It also checks that the NumPy AdamW can overfit a single batch.
 
-`tests/test_torch_port.py` compares model logits, attention output, cross entropy, and the gradient of every parameter (weights, biases, LayerNorm gains and shifts, embeddings) on identical float64 weights and tokens. It also checks causality. `tests/test_pretrained.py` loads the real GPT-2 small checkpoint with `load_pretrained_gpt2` and compares its logits with HuggingFace `GPT2LMHeadModel` (it is skipped until the weights are in the local HuggingFace cache; `python benchmark.py` downloads them). These tests are a required gate before interpreting LoRA results.
+**NumPy vs PyTorch** (`test_numpy_torch_parity.py`). Both models get identical float64 weights. Logits, the attention output and the loss must match to 1e-11. The gradient of every parameter must match to rtol 1e-8, atol 1e-10.
 
-## LoRA
+**LoRA vs PEFT** (`test_lora_peft_parity.py`). My `LoRALinear` and PEFT's `LoraModel` are given the same base weights and the same A and B matrices, in float64. Trainable parameter counts must be equal. Outputs and loss must match to 1e-11. LoRA gradients, the outputs after one SGD step, and the merged weights must match to 1e-10. `test_lora.py` also checks that inserting adapters leaves outputs exactly unchanged, that only A and B train, and that save/load and merging work.
 
-For a PyTorch linear weight `W₀` of shape `(out, in)`, LoRA computes
+**Pretrained weights** (`test_pretrained.py`). The PyTorch model loaded from OpenAI's GPT-2 checkpoint must produce the same logits as Hugging Face `GPT2LMHeadModel`, within rtol 1e-4 and atol 5e-4 in float32, and the same argmax at every position. This test is skipped until the weights are in the local Hugging Face cache. Running the benchmark downloads them.
 
-`y = x W₀ᵀ + b + (α/r) dropout(x) Aᵀ Bᵀ`, where `A` is `(r, in)` and `B` is `(out, r)`.
+## Results
 
-The base model is frozen. `A` uses Kaiming uniform initialization and `B` starts at zero, so inserting adapters preserves the initial output exactly when dropout is disabled (and also while `B` is zero). At the first step, `B` receives a gradient while `A` normally receives zero gradient; `A` becomes trainable after `B` moves away from zero. Targets default to each block's fused QKV attention projection, attention output projection, MLP input projection, and MLP output projection. Biases and embeddings stay frozen. Merging adds `(α/r) BA` to the base weight. Do not merge repeatedly or continue adapter training after merge. Adapter files contain only target configurations and adapter tensors; the original base checkpoint is still needed for loading.
+Both runs start from pretrained GPT-2 small and fine-tune on Tiny Shakespeare. The data is 304,222 training tokens and 33,803 validation tokens, tokenized with GPT-2 BPE and split contiguously 90/10.
 
-`tests/test_lora.py` checks shapes, freezing, initialization, gradients, adapter persistence, and merged outputs. `tests/test_peft.py` wraps an identical PyTorch GPT with PEFT's `LoraModel`, copies `A` and `B` directly into PEFT's adapters, and compares trainable-parameter counts, outputs, losses, gradients, one SGD update, and merged outputs. The reference uses PEFT's ordinary `nn.Linear` convention, rank/alpha/dropout, four targets, and `bias='none'`. A passing test, rather than code inspection alone, is necessary to claim numerical agreement.
+Training settings are shared by both runs:
+- batch 4 × 256 tokens, 300 AdamW steps, gradient clipping at 1.0, and the same seeded batches;
+- learning rate 3e-5 for full fine-tuning and 1e-3 for LoRA;
+- LoRA rank 8, alpha 16, on the attention and MLP projections of all 12 blocks.
 
-## Install and test
+Each run is a separate process. Validation loss is measured on all 132 non-overlapping 256-token windows of the held-out split.
 
-```bash
-python -m pip install -r requirements-lora.txt
-python -m pytest -rs tests      # expect 5 passed, 0 skipped (4 passed, 1 skipped before the GPT-2 weights are cached)
-```
+Hardware: NVIDIA GeForce RTX 3050 Ti Laptop GPU (4 GB, driver 610.47), AMD Ryzen 5 5600H, 6.7 GiB RAM visible to WSL2, PyTorch 2.15.0 (CUDA 13.2), PEFT 0.21.2.
 
-PyTorch and PEFT are optional to the original NumPy notebooks; the separate requirements file avoids changing their dependencies. Every test module uses `pytest.importorskip`, so a run where every test is skipped also exits 0. Check the summary for `0 skipped`, using `-rs` to list skip reasons.
-
-**WSL2 note.** If a native Linux NVIDIA driver is installed inside WSL (it shows up as `/lib/x86_64-linux-gnu/libcuda.so.<version>`), PyTorch segfaults on CUDA initialization. Autograd initializes CUDA, so this happens even for CPU-only `backward()`. The WSL driver loads the native driver's `libnvidia-ptxjitcompiler`, and the two versions don't match. On this machine they come from Ubuntu's `libnvidia-compute-580` package. The proper fix is `sudo apt remove libnvidia-compute-580`, but check apt's prompt first, because packages that depend on it, such as `nvidia-cuda-toolkit`, may be removed too. Until then, put the Windows driver directory first on the library path:
-
-```bash
-export LD_LIBRARY_PATH="/usr/lib/wsl/lib:$(dirname "$(ls -t /usr/lib/wsl/drivers/*/libcuda.so.1.1 | head -1)")"
-```
-
-## Benchmark: LoRA vs full fine-tuning on Tiny Shakespeare
-
-```bash
-python benchmark.py             # ~4 min on an RTX 3050 Ti Laptop GPU; writes results/shakespeare_gpt2/
-```
-
-Both arms start from **pretrained GPT-2 small (124M)** (`openai-community/gpt2` safetensors, loaded with `gpt_torch.load_pretrained_gpt2`) and fine-tune on [Tiny Shakespeare](https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt), tokenized with GPT-2 BPE (tiktoken):
-
-- **Data:** 304,222 training tokens and 33,803 validation tokens, from a contiguous 90/10 split.
-- **Fixed settings:** both arms train on the same seeded random windows, with batch 4 × 256 tokens, 300 AdamW steps, weight decay 0.01, gradient clipping at 1.0, and a 20-step linear warmup to a constant learning rate.
-- **Learning rates:** 3e-5 for full fine-tuning and 1e-3 for LoRA. LoRA usually needs a much larger LR, so a shared LR would handicap one arm. These are conventional values, not tuned.
-- **LoRA config:** rank 8, alpha 16, dropout 0, on `attn.c_attn`, `attn.c_proj`, `mlp.c_fc` and `mlp.c_proj` in all 12 blocks.
-- **Process isolation:** each arm runs in its own process, so CUDA caches and peak-memory counters are not shared between arms.
-- **Determinism:** runs use `torch.use_deterministic_algorithms(True)`.
-
-Metric definitions:
-
-- **Time/step:** a synchronized forward, backward, gradient clip and optimizer step. It excludes evaluation and the first 10 steps, and reports the median with the p10–p90 range.
-- **Peak memory:** `torch.cuda.max_memory_allocated`. The counter is reset after the model is loaded, so the resident weights are included, and it covers training and periodic evaluation.
-- **Validation loss:** mean token cross-entropy over all 132 non-overlapping 256-token windows of the held-out split, measured at step 0 and every 50 steps.
-
-### Results
-
-| Metric | Full fine-tune | LoRA (r=8) |
+| GPU, 300 steps | Full fine-tune | LoRA (r=8) |
 |---|---:|---:|
 | Trainable parameters | 124,439,808 (100%) | 1,179,648 (0.94%) |
-| Peak GPU memory allocated | 2,746 MiB | 1,800 MiB (−34%) |
-| Peak GPU memory reserved | 3,076 MiB | 1,926 MiB |
-| Time/step, median [p10–p90] | 328 ms [324–331] | 222 ms [221–223] (−32%) |
-| Validation loss, step 0 (pretrained) | 4.3267 | 4.3267 |
-| Validation loss, step 300 | **3.3799** | 3.4131 |
-| Validation perplexity, step 300 | 29.37 | 30.36 |
+| Peak GPU memory allocated | 2,746 MiB | 1,800 MiB |
+| Time per step, median | 328 ms | 223 ms |
+| Validation loss, before training | 4.3267 | 4.3267 |
+| Validation loss, after 300 steps | 3.3799 | 3.4131 |
 
-Hardware: NVIDIA GeForce RTX 3050 Ti Laptop GPU (4 GB), Windows driver 610.47 under WSL2, AMD Ryzen 5 5600H, 6.7 GiB RAM visible to WSL; PyTorch 2.15.0+cu132, PEFT 0.21.2, Python 3.12.3. The full record, per-step losses and timings are in [`results/shakespeare_gpt2/`](results/shakespeare_gpt2/): `results.json`, `full.json`, `lora.json`, `comparison.md`, `validation_loss.png` and `train_loss.png`.
+Time per step covers forward, backward, clipping and the optimizer step, with the GPU synchronized. Evaluation and the first 10 steps are excluded. Peak GPU memory is measured after the model is loaded and includes the resident weights.
 
-![Validation loss](results/shakespeare_gpt2/validation_loss.png)
+**CPU vs GPU.** The same benchmark was run on the CPU for 20 steps with the same batch, to measure time per step only:
 
-On this run:
+| Time per step, median | Full fine-tune | LoRA |
+|---|---:|---:|
+| GPU (RTX 3050 Ti) | 328 ms | 223 ms |
+| CPU (Ryzen 5 5600H, 6 torch threads) | 4,808 ms | 3,659 ms |
+| CPU peak process memory (RSS) | 4,138 MiB | 3,339 MiB |
 
-- LoRA trains under 1% of the parameters.
-- LoRA uses about a third less peak GPU memory, mostly because AdamW state and gradients exist only for the adapters.
-- LoRA is about a third faster per step, because no weight gradients are computed for the frozen base. The frozen base still runs in both the forward and backward passes.
-- Full fine-tuning reaches a validation loss 0.033 nats/token lower after 300 steps.
+The NumPy model fine-tunes the same pretrained weights on the CPU too. Its run used batch 2 × 128 for 20 steps, so the numbers aren't comparable with the tables above. It took 3.1 s per step with 2,805 MiB peak memory. Validation loss on 16 held-out windows went from 4.196 to 3.597.
 
-The batch size was chosen so that full fine-tuning fits in the 4 GB of VRAM. At batch 8 × 256, the WSL driver silently spills into shared system memory instead of raising an out-of-memory error, and steps become about 5× slower. That would corrupt the timing comparison.
+Raw results, per-step losses, plots and the full hardware record are in `results/shakespeare_gpt2/`, `results/shakespeare_gpt2_cpu/` and `results/finetune_numpy/`.
 
-## Scope and limitations
+## How to run
 
-- **Single run.** This is one seed and one short run of 300 steps (about 0.3M tokens, roughly one epoch). The quality gap between the arms is not a confidence interval, and it may change with longer training, tuned learning rates, a different rank, or other target modules.
-- **Memory headroom.** LoRA's memory saving would grow with batch size, but the full fine-tuning arm leaves too little VRAM on this GPU to test larger batches.
-- **Small speed-up.** LoRA does not remove the frozen model's forward and backward passes, so its speed-up is modest compared with its parameter reduction.
-- **Hardware dependence.** Timings come from a laptop GPU under WSL2 and will differ on other hardware.
-- **Narrow task.** Tiny Shakespeare is a small, stylistically narrow corpus. The result is not a general claim about downstream fine-tuning.
+```bash
+pip install -r requirements.txt     # the Linux torch wheel includes CUDA (several GB)
+pytest                              # 19 passed (18 passed, 1 skipped before GPT-2 weights are cached)
+python benchmark.py                 # LoRA vs full fine-tune on GPU, ~4 min
+python benchmark.py --device cpu --steps 20 --eval-every 20 --timing-skip 5   # CPU timing run
+python finetune_numpy.py            # fine-tune pretrained GPT-2 in pure NumPy on CPU, 20 steps
+```
+
+The scripts download Tiny Shakespeare (1.1 MB) into `data/` and the GPT-2 weights (550 MB) into the Hugging Face cache on first use.
+
+On WSL2, if torch segfaults on CUDA initialization, a native Linux NVIDIA driver installed inside WSL is probably conflicting with the Windows driver. A workaround is to run `export LD_LIBRARY_PATH="/usr/lib/wsl/lib:$(dirname "$(ls -t /usr/lib/wsl/drivers/*/libcuda.so.1.1 | head -1)")"` first.
+
+## Files
+
+| File | Contents |
+|---|---|
+| `gpt_numpy.py` | GPT-2 in NumPy: layers with handwritten backward passes, AdamW, sampling, safetensors loader |
+| `gpt_torch.py` | PyTorch port of the same model, NumPy-to-PyTorch weight copy, pretrained loader |
+| `lora.py` | LoRA layer, apply/merge, adapter save/load |
+| `common.py` | Tiny Shakespeare loader and machine description shared by the scripts |
+| `benchmark.py` | LoRA vs full fine-tuning; writes JSON, a Markdown table and plots to `results/` |
+| `finetune_numpy.py` | Fine-tunes pretrained GPT-2 with the NumPy model; writes `results/finetune_numpy/` |
+| `tests/` | Gradient checks, NumPy/PyTorch parity, LoRA/PEFT parity, LoRA behaviour, pretrained loading |
+| `results/` | Saved benchmark and fine-tuning results |
+| `requirements.txt` | Pinned dependencies |
+| `pytest.ini` | Lets `pytest` import the modules from the repository root |
+| `LICENSE` | MIT license |
+
+## Limitations
+
+These are single runs with one seed. The 0.033 validation-loss gap between full fine-tuning and LoRA is a single short run, not a measured confidence interval, and could change with longer training, tuned learning rates or a different rank. The learning rates are common defaults, not tuned.
+
+All timings come from one laptop GPU and CPU under WSL2. The batch was chosen so that full fine-tuning fits in 4 GB of VRAM. Larger batches would likely widen the memory gap, but full fine-tuning doesn't fit on this GPU at larger batches, so that wasn't measured.
+
+The NumPy model is for correctness and understanding, not speed. It has no KV cache, and the PyTorch port uses an explicit attention mask instead of a fused attention kernel.
