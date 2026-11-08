@@ -6,8 +6,8 @@ import pytest
 import gpt_numpy as g
 from gpt_numpy import numerical_grad, rel_error
 
-FULL_CHECK_TOL = 1e-7   # every entry checked, float64; measured errors are <= 2.1e-9
-SPOT_CHECK_TOL = 1e-6   # sampled entries at GPT-2 small width; measured errors are <= 8.6e-8
+FULL_CHECK_TOL = 1e-7   # every entry checked, float64; worst measured error 4.8e-9
+SPOT_CHECK_TOL = 1e-6   # sampled entries at GPT-2 small width; worst measured error 8.3e-8
 
 
 def layer_errors(layer, x, rng):
