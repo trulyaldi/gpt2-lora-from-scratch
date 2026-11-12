@@ -13,11 +13,11 @@ REPO = 'openai-community/gpt2'
 
 
 def test_pretrained_gpt2_matches_huggingface():
+    from transformers import GPT2LMHeadModel
     try:
         path = hf_hub_download(REPO, 'model.safetensors', local_files_only=True)
-        from transformers import GPT2LMHeadModel
         reference = GPT2LMHeadModel.from_pretrained(REPO, local_files_only=True, attn_implementation='eager')
-    except Exception as exc:  # not cached locally
+    except OSError as exc:  # cache miss only (LocalEntryNotFoundError is an OSError); other errors fail
         pytest.skip(f'GPT-2 weights not in local cache: {exc}')
     ours = load_pretrained_gpt2(path).eval()
     reference.eval()
