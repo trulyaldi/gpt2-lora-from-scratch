@@ -2,6 +2,7 @@ numpy==2.5.4
 tiktoken==0.14.0
 torch==2.15.0
 peft==0.21.2
+bitsandbytes==0.50.2
 transformers==4.57.6
 huggingface_hub==0.36.2
 matplotlib==3.11.2
