@@ -1,0 +1,22 @@
+{
+  "method": "full",
+  "lr": 3e-05,
+  "seed": 0,
+  "steps": 20,
+  "batch_size": 8,
+  "micro_batch_size": 4,
+  "sequence_length": 256,
+  "eval_every": 5,
+  "warmup_steps": 5,
+  "min_lr_ratio": 0.1,
+  "weight_decay": 0.01,
+  "grad_clip": 1.0,
+  "rank": 8,
+  "alpha": 16.0,
+  "dropout": 0.0,
+  "checkpoint_every": 10,
+  "timing_skip": 3,
+  "deterministic": true,
+  "save_best": false,
+  "run_dir": "results/smoke/runs/tune/full/lr3e-05"
+}

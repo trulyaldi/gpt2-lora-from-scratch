@@ -1,0 +1,7 @@
+method,lr,status,best_validation_loss,best_step,selected
+full,3e-05,completed,3.7630308104636976,20,False
+full,0.0001,completed,3.686874366344366,20,True
+lora,0.001,completed,3.772801571322563,20,False
+lora,0.003,completed,3.7054908329382874,20,True
+qlora,0.001,completed,3.8074863064557984,20,False
+qlora,0.003,completed,3.7406176122507655,20,True
