@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 
 import gpt_numpy as g
-from common import ROOT, gpt2_weights_path, load_shakespeare, system_info
+from common import ROOT, gpt2_weights_path, load_splits, system_info
 
 
 def parse_args():
@@ -47,7 +47,8 @@ def main():
     """Load pretrained GPT-2 into the NumPy model, fine-tune, evaluate, sample, and save results."""
     args = parse_args()
     rng = np.random.default_rng(args.seed)
-    train, val, _ = load_shakespeare()
+    tokens, _ = load_splits(('train', 'validation'))
+    train, val = tokens['train'], tokens['validation']
 
     model = g.GPT(dtype=np.float32)
     g.load_hf_gpt2(model, gpt2_weights_path())
