@@ -5,3 +5,5 @@ data/
 *.safetensors
 results/**/*.pt
 results/**/*.tmp
+results/smoke/
+results/runs/**/stderr.log

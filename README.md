@@ -1,19 +1,74 @@
 # GPT-2 from scratch: NumPy, PyTorch, LoRA and QLoRA
 
-GPT-2 small (124M parameters) written in plain NumPy with every backward pass derived by hand, then ported to PyTorch, extended with LoRA and 4-bit QLoRA written from scratch, and used to measure what LoRA and QLoRA save compared with full fine-tuning on a GPU. Every implementation is tested against an independent reference.
+I wrote GPT-2 small (124M) in plain NumPy with every backward pass derived by hand, ported it to PyTorch, and added LoRA and 4-bit QLoRA, also written from scratch. Then I used it to measure what parameter-efficient fine-tuning actually buys on a 4 GB laptop GPU (RTX 3050 Ti) compared with full fine-tuning. Each implementation is checked against an independent reference: finite differences, Hugging Face GPT-2, PEFT and bitsandbytes.
 
-## Key results
+## Setup
 
-- **Correct gradients.** Every handwritten gradient matches finite differences; worst relative error 4.8e-9.
-- **Matching implementations.** The PyTorch port matches the NumPy model to 1e-11, my LoRA matches Hugging Face PEFT to 1e-10, my 4-bit NF4 quantization matches bitsandbytes, and the pretrained model matches Hugging Face's GPT-2.
-- **LoRA vs full fine-tuning on a 4 GB laptop GPU.** LoRA trained 0.95% of GPT-2's parameters, used 34% less GPU memory and 33% less time per step, and reached a validation loss of 3.41, against 3.38 for full fine-tuning.
-- **QLoRA vs LoRA.** Storing the frozen weights in 4 bits cut the model's GPU memory from 480 to 217 MiB and peak memory by a further 14%. QLoRA reached a validation loss of 3.44 and was 36% slower per step than LoRA.
+```bash
+pip install -r requirements.txt   # the Linux torch wheel includes CUDA
+pytest                            # the CUDA, bitsandbytes and pretrained-weight tests skip when unavailable
+python benchmark.py all --preset smoke   # ~9 min pipeline check, writes results/smoke/ (not committed)
+python benchmark.py all                  # the full benchmark below, roughly 3-3.5 h on the 3050 Ti
+python finetune_numpy.py                 # 20 fine-tuning steps of the NumPy model on the CPU
+```
+
+Tiny Shakespeare (1.1 MB) and the GPT-2 weights (550 MB) download on first use. `benchmark.py` stages (`tune`, `final`, `test`, `report`) can be run one at a time; finished runs are skipped and interrupted runs resume from their last checkpoint. Any setting can be overridden, e.g. `--steps 2000 --seeds 1 2 3 4 5`.
+
+## The three methods
+
+- **Full fine-tuning** updates all 124M parameters. AdamW keeps two fp32 moments per parameter, so gradients plus optimizer state cost about 1.4 GB on top of the weights.
+- **LoRA** freezes the model and learns a low-rank update `W + (alpha/r)·B·A` for the attention and MLP projections (`attn.c_attn`, `attn.c_proj`, `mlp.c_fc`, `mlp.c_proj`) in all 12 blocks. Rank 8 gives 1.18M trainable parameters (0.95%). B starts at zero, so training starts exactly from the pretrained model.
+- **QLoRA** is the same LoRA, but the frozen projection weights are stored in 4-bit NF4 (block size 64, one fp32 scale per block) and dequantized on the fly in forward and backward. Compute stays fp32, so QLoRA differs from LoRA only in how the frozen weights are stored. Double quantization and paged optimizers are not implemented; at this model size they would save a few MiB.
+
+## Experimental setup
+
+**Data.** Tiny Shakespeare is cut into contiguous sections at blank lines (between speeches) before tokenization:
+
+| Split | Characters | GPT-2 tokens |
+|---|---:|---:|
+| train (80%) | 892,487 | 267,738 |
+| validation (10%) | 111,370 | 34,229 |
+| test (10%) | 111,537 | 36,056 |
+
+Each section is tokenized on its own. Training windows are sampled inside the training section, so no sequence crosses a split. Training and tuning never load the test split; a test checks this.
+
+**Training**, identical for every method:
+- Model and data: pretrained GPT-2 small, fp32 compute, same seeded batch order.
+- Batch: 8 × 256 tokens per step, as 2 micro-batches of 4 with gradient accumulation. That is the largest that fits full fine-tuning in 4 GB.
+- Length: 1000 steps, 2.05M tokens, about 7.6 passes over the training split.
+- Optimizer: AdamW with weight decay 0.01 and gradient clipping at 1.0. The learning rate warms up linearly for 50 steps, then follows a cosine decay to 10% of its peak.
+- Evaluation: validation loss every 50 steps on all non-overlapping 256-token validation windows.
+- LoRA and QLoRA: rank 8, alpha 16, no dropout.
+
+**Selection protocol:**
+1. **Tune.** For each method, one run per learning rate on tuning seed 0, with the same schedule as the final runs. Each run's best validation loss decides the LR.
+   - Full fine-tuning tries 1e-5, 3e-5 and 1e-4.
+   - LoRA and QLoRA, tuned separately, each try 3e-4, 1e-3 and 3e-3.
+   - That is three candidates for every method.
+2. **Final.** Seeds 42, 123 and 456 with the selected LR. Each run keeps the checkpoint with the lowest validation loss.
+3. **Test.** Each checkpoint is reloaded, its validation loss is re-measured and must match the recorded value, and only then is the test set evaluated once.
+
+**Measurement:**
+- Training time is the sum of per-step times between `torch.cuda.synchronize()` calls. Evaluation and checkpoint I/O are excluded.
+- Peak memory is the maximum of `torch.cuda.max_memory_allocated/reserved()` over training steps.
+- Every run is a separate process, with deterministic algorithms on. In a 30-step check they cost 1.6–3.6% per step for all three methods alike.
+- A run whose reserved memory exceeds the GPU's physical memory fails as out-of-memory. Under WSL2 the driver otherwise silently spills into system RAM; a forced test reserved 7.4 GB and ran at 11.3 s/step.
 
 ## Results
 
-**Legacy run.** The numbers in this section and in *Key results* come from the original 300-step, single-seed, untuned benchmark on a 90/10 split, with no separate test set (`results/shakespeare_gpt2/`). The current benchmark is `benchmark.py`. It uses an 80/10/10 split, learning-rate search on validation loss, 3 seeds, and test-set evaluation of the best-validation checkpoint. See [Multi-seed benchmark](#multi-seed-benchmark) and `BENCHMARK_REPORT.md`.
+### Multi-seed benchmark
 
-Pretrained GPT-2 small fine-tuned on Tiny Shakespeare (304,222 training and 33,803 validation tokens, contiguous 90/10 split).
+<!-- results:start -->
+
+_Generated by `python benchmark.py report` from `results/`._
+
+**Pending.** The multi-seed benchmark has not been run yet (`python benchmark.py all`). No numbers are shown until it has.
+
+<!-- results:end -->
+
+### Earlier 300-step run (legacy)
+
+This was the first comparison, before the setup above existed. It used a single seed (1337) and untuned learning rates (3e-5 for full fine-tuning, 1e-3 for LoRA and QLoRA). It ran 300 steps of 4 × 256 tokens with warmup to a constant LR, on a 90/10 split with no test set. The numbers are validation losses on that older split, so they are not directly comparable with the table above. Raw data is in `results/shakespeare_gpt2/`.
 
 | RTX 3050 Ti Laptop (4 GB), 300 steps | Full fine-tune | LoRA (rank 8) | QLoRA (rank 8, NF4) |
 |---|---:|---:|---:|
@@ -23,94 +78,54 @@ Pretrained GPT-2 small fine-tuned on Tiny Shakespeare (304,222 training and 33,8
 | Time per step (median) | 325 ms | 218 ms | 296 ms |
 | Validation loss, before → after | 4.327 → 3.380 | 4.327 → 3.413 | 4.480 → 3.438 |
 
-The memory saving is almost exactly the AdamW state for 124M parameters (about 950 MiB). The frozen weights and the activations still have to fit, which is why the saving is 34% and not more at this batch size.
+![Legacy validation loss](results/shakespeare_gpt2/validation_loss.png)
 
-QLoRA stores the 85M attention and MLP projection weights in 4-bit NF4, with one fp32 scale per 64 values, and dequantizes them on the fly. Embeddings, LayerNorms and biases stay in fp32. Its peak memory is 262 MiB below LoRA's; most of the remaining memory is activations, not weights. Quantization alone raises the starting validation loss from 4.327 to 4.480 (bitsandbytes' NF4 gives the same 4.480), and training recovers most of it. QLoRA is slower than LoRA because my layers dequantize with ordinary PyTorch operations in every forward and backward pass, where bitsandbytes uses fused CUDA kernels. Double quantization and paged optimizers from the QLoRA paper are not implemented; at this size they would save only a few MiB.
+What that run showed:
+- **LoRA's memory saving** is almost exactly the AdamW state for 124M parameters (about 950 MiB). Activations and frozen weights still have to fit, which is why peak memory drops 34% and not more.
+- **QLoRA** cuts the model's footprint from 480 to 217 MiB. Quantization alone raises the starting loss from 4.327 to 4.480; bitsandbytes' NF4 gives the same 4.480.
+- **QLoRA is slower than LoRA** because my layers dequantize with plain PyTorch ops rather than fused kernels.
 
-Separately, the NumPy model fine-tunes the pretrained weights on the CPU, at 3.1 s per step with a smaller batch (2 × 128).
+The NumPy model fine-tunes pretrained GPT-2 on the CPU at 3.1 s per step with batch 2 × 128 (`results/finetune_numpy/`, also measured on the old 90/10 split).
 
-**Setup.** All runs use the same seeded batches of 4 × 256 tokens, AdamW (weight decay 0.01) with a 20-step warmup, gradient clipping at 1.0, and learning rates of 3e-5 (full) and 1e-3 (LoRA and QLoRA). All compute in fp32, so QLoRA differs from LoRA only in how the frozen weights are stored. LoRA and QLoRA use rank 8 and alpha 16 on the attention and MLP projections of all 12 blocks. Each run is a separate process. Validation covers all 132 non-overlapping 256-token windows of the held-out split. Timings are synchronized, exclude evaluation and the first 10 steps, and were taken with PyTorch's deterministic mode on. PyTorch 2.14.1 (CUDA 12.6).
+## Discussion and limitations
 
-Raw data, per-step losses, plots and the full hardware record are in `results/shakespeare_gpt2/`.
+The quality, speed and memory trade-off between the three methods is the question the multi-seed benchmark answers. I'll write the discussion from its numbers once it has run, not from the legacy run. Confounds that are part of the design:
 
-## Multi-seed benchmark
+- **Learning rates differ by method.** Each method gets its own three-point grid, and only the LR is tuned. Rank, alpha, weight decay and the schedule are fixed. If the selected LR sits at the edge of its grid, the generated table says so.
+- **Weight decay** hits embeddings, LayerNorms and biases in full fine-tuning, but only the adapter matrices in LoRA and QLoRA.
+- **QLoRA starts from a worse model** (the NF4-quantized one), and its dequantization is unfused, so its per-step time is an upper bound for an optimized implementation.
+- **Gradient accumulation** keeps full-size gradients alive across micro-batches, which raises full fine-tuning's peak memory. Micro-batches larger than 4 were not measured; 16 did not fit full fine-tuning in 4 GB. Adapter savings would grow with larger batches.
+- **3 seeds** give a rough spread, not a confidence interval.
+- **One laptop GPU under WSL2.** Peak reserved memory for full fine-tuning (~3.5 GB) is close to what the desktop leaves free, so its step times should be checked for outliers across seeds.
+- **The test split is the last 10% of the text** (mostly later plays), so it differs somewhat from the training text.
+- **Deterministic mode** makes reruns on this machine repeatable: two smoke runs gave identical test losses to 4 decimal places, and a killed-and-resumed run matched an uninterrupted one exactly. It is not a guarantee of identical results on other GPUs or library versions.
 
-`benchmark.py` runs the comparison in four stages, each resumable:
+## How it is tested
 
-1. **tune**: one run per learning rate per method on tuning seed 0. Full fine-tuning tries 1e-5, 3e-5 and 1e-4; LoRA and QLoRA each try 3e-4, 1e-3 and 3e-3. The LR with the lowest best-checkpoint validation loss is selected.
-2. **final**: seeds 42, 123 and 456, each with the selected LR, keeping the checkpoint with the lowest validation loss.
-3. **test**: reload each checkpoint, check that its validation loss matches the recorded value, then measure test loss.
-4. **report**: mean ± std, CSV/JSON, figures in `results/figures/` and `BENCHMARK_REPORT.md`.
-
-Data handling:
-- The raw text is cut into contiguous 80/10/10 sections at blank lines, and each section is tokenized separately. Training windows never cross a split.
-- Training and tuning never load the test split.
-
-Every method uses the same settings:
-- the same pretrained weights, batches, effective batch (8 × 256 tokens, as 2 micro-batches of 4), and number of steps (1000 by default)
-- warmup followed by cosine decay
-- the same evaluation points and loss
-
-Each run is its own process.
-
-Failure handling:
-- A failed run, including CUDA out-of-memory, is recorded in `failed.json`, listed in the report, and makes the command exit non-zero.
-- A run whose reserved memory exceeds the GPU's physical memory is treated as out-of-memory. On WSL2 the driver otherwise spills silently into system RAM. In one forced test (full fine-tuning, batch 16 in a single micro-batch), the run reserved 7.4 GB on the 4 GB GPU and took 11.3 s per step instead of failing.
-
-```bash
-python benchmark.py all --preset smoke   # ~9 min: 2 LRs x 2 seeds x 20 steps, results/smoke/ (pipeline check only)
-python benchmark.py all                  # default: 3 LRs + 3 seeds x 1000 steps per method, several hours
-python benchmark.py all --steps 2000 --seeds 1 2 3 4 5   # any option can be overridden
-```
-
-## How it is verified
-
-41 pytest tests in `tests/`:
-
-| Test | What it checks | Tolerance |
-|---|---|---|
-| `test_gradcheck.py` | Every NumPy layer and a full 2-layer GPT against finite differences (float64); causal masking; expected initial loss; overfitting a single batch | relative error < 1e-7 |
-| `test_numpy_torch_parity.py` | Same weights in both models: logits, loss and every parameter gradient | 1e-11 (outputs), 1e-8 (gradients) |
-| `test_lora_peft_parity.py` | My LoRA against PEFT with identical weights: outputs, gradients, one optimizer step, merged weights | 1e-10 |
-| `test_lora.py` | Adapters leave outputs unchanged at start, only A and B train, save/load and merging work | exact |
-| `test_qlora.py` | NF4 code table and quantization against bitsandbytes; QLoRA against LoRA on the dequantized weights; the custom backward against `gradcheck`; backward keeps no full-precision weights | exact codes and scales, except values within float32 rounding of a level midpoint (bitsandbytes' kernel rounds those either way, about 1 in 15 million); 1e-10 (gradients) |
-| `test_benchmark.py` | 80/10/10 split is contiguous and tokenized per split; batch order depends only on the seed; full fine-tuning updates pretrained weights; LoRA/QLoRA freeze the base (bitwise) and update only A and B, with optimizer state for adapters only; gradient accumulation equals one large batch; evaluation and statistics; on CUDA, a short run of each method loads no test data and its checkpoint reloads | 1e-10 / exact |
-| `test_pretrained.py` | Loaded OpenAI weights give the same logits and predictions as Hugging Face `GPT2LMHeadModel` | 1e-4 (float32) |
-
-## Quick start
-
-```bash
-pip install -r requirements.txt   # Linux torch wheel includes CUDA (several GB)
-pytest                            # 41 tests; the pretrained test is skipped until weights are cached,
-                                  #   the bitsandbytes comparison without CUDA
-python benchmark.py all --preset smoke   # benchmark pipeline check, about 9 min (see above for the full run)
-python finetune_numpy.py          # fine-tune pretrained GPT-2 in pure NumPy, 20 steps
-```
-
-Tiny Shakespeare (1.1 MB) and the GPT-2 weights (550 MB) download automatically on first use.
+| Test file | What it checks |
+|---|---|
+| `test_gradcheck.py` | Every handwritten NumPy backward pass and a full 2-layer GPT against finite differences in float64 (worst relative error 4.8e-9); causal masking; initial loss; overfitting one batch |
+| `test_numpy_torch_parity.py` | NumPy and PyTorch models with the same weights: logits, loss and all gradients agree to 1e-11 / 1e-8 |
+| `test_pretrained.py` | Loaded OpenAI weights reproduce Hugging Face `GPT2LMHeadModel` logits (1e-4, fp32) |
+| `test_lora.py` | LoRA starts as the identity, trains only A and B, saves/loads and merges; matches PEFT on outputs, gradients, an optimizer step and merged weights (1e-10) |
+| `test_qlora.py` | NF4 codes and scales match bitsandbytes; QLoRA equals LoRA on the dequantized weights; the custom backward passes `gradcheck` and keeps no full-precision weight |
+| `test_training.py` | The 80/10/10 split; seed-only batch order; full fine-tuning changes the pretrained weights; LoRA/QLoRA leave the base bit-identical and give AdamW only the adapters; gradient accumulation equals one big batch; evaluation is a token-weighted mean; checkpoints round-trip; on CUDA, a short run of each method never loads the test split and its checkpoint reloads to the recorded validation loss |
 
 ## Files
 
-| File | Contents |
+| | |
 |---|---|
 | `gpt_numpy.py` | GPT-2 in NumPy with handwritten backward passes, AdamW and a weight loader |
 | `gpt_torch.py` | PyTorch port and pretrained-weight loader |
-| `lora.py` | LoRA layer, apply, merge, save and load |
-| `qlora.py` | NF4 quantization, 4-bit frozen linear layer and QLoRA layer |
-| `benchmark.py` | Benchmark CLI: LR tuning, multi-seed final runs, test evaluation, report |
-| `training.py` | The single training loop used by all three methods, evaluation, checkpointing and resume |
-| `analysis.py` | Mean ± std across seeds, CSV/JSON, figures and `BENCHMARK_REPORT.md` |
+| `lora.py`, `qlora.py` | LoRA layer; NF4 quantization and the QLoRA layer |
+| `common.py` | Data download, 80/10/10 split, seeding, machine description |
+| `training.py` | The one training loop all methods use: evaluation, checkpoints, resume, timing and memory |
+| `benchmark.py` | CLI: LR search, final seeds, test evaluation, report |
+| `analysis.py` | Mean ± std over seeds, CSV/JSON tables, figures, the results block above |
 | `finetune_numpy.py` | Fine-tuning with the NumPy model |
-| `common.py` | Dataset splits, seeding and hardware description |
-| `tests/` | The tests above |
+| `results/` | `runs/` holds each run's config, per-step and per-evaluation CSVs and summary JSON; `figures/`, `tuning.csv`, `final_runs.csv` and `summary.json` hold the aggregates; `shakespeare_gpt2/` is the legacy run |
 
-## Limitations
-
-- The legacy results above are single runs with one seed and untuned learning rates. The validation-loss gaps (0.033 from full fine-tuning to LoRA, 0.025 from LoRA to QLoRA) could change with longer training, other learning rates or another rank.
-- All timings come from one laptop GPU under WSL2. The batch is limited by fitting full fine-tuning into 4 GB, so larger batches, where LoRA's memory advantage would grow, were not measured.
-- The NumPy model is built for correctness, not speed. The PyTorch port uses an explicit attention mask, not a fused attention kernel.
-
-**WSL2 note.** If torch crashes when CUDA starts, a Linux NVIDIA driver installed inside WSL is probably conflicting with the Windows driver. Run this first:
+**WSL2 note.** If torch crashes when CUDA starts, a Linux NVIDIA driver installed inside WSL is probably conflicting with the Windows driver:
 `export LD_LIBRARY_PATH="/usr/lib/wsl/lib:$(dirname "$(ls -t /usr/lib/wsl/drivers/*/libcuda.so.1.1 | head -1)")"`
 
 ## License

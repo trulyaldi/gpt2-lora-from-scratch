@@ -10,7 +10,8 @@ Stages:
           best-checkpoint validation loss per method -> selected_hparams.json. No test data is loaded.
   final   one run per (method, seed) with the selected LR, saving the lowest-validation-loss checkpoint.
   test    reloads each final checkpoint, re-checks its validation loss, then measures test loss.
-  report  aggregates mean +- std over seeds, writes CSV/JSON, figures and BENCHMARK_REPORT.md.
+  report  mean +- std over seeds, CSV/JSON tables and figures; rewrites the results block of README.md
+          (only for the default results/ directory; other outputs get <output>/results.md).
 
 Each training run is a separate process (fresh allocator, kernel caches and peak-memory counters).
 Finished runs are skipped and interrupted ones resume from last.pt, so rerunning a stage continues it.
@@ -29,11 +30,11 @@ from common import HF_REPO, ROOT, load_splits, system_info
 METHODS = ('full', 'lora', 'qlora')
 
 PRESETS = {
-    'default': dict(output='results', report='BENCHMARK_REPORT.md', steps=1000, batch_size=8, micro_batch_size=4,
+    'default': dict(output='results', steps=1000, batch_size=8, micro_batch_size=4,
                     sequence_length=256, eval_every=50, warmup_steps=50, checkpoint_every=200, timing_skip=10,
                     seeds=[42, 123, 456], tune_seed=0,
                     lr_grid_full=[1e-5, 3e-5, 1e-4], lr_grid_adapter=[3e-4, 1e-3, 3e-3]),
-    'smoke': dict(output='results/smoke', report='results/smoke/BENCHMARK_REPORT.md', steps=20, batch_size=8,
+    'smoke': dict(output='results/smoke', steps=20, batch_size=8,
                   micro_batch_size=4, sequence_length=256, eval_every=5, warmup_steps=5, checkpoint_every=10,
                   timing_skip=3, seeds=[42, 123], tune_seed=0,
                   lr_grid_full=[3e-5, 1e-4], lr_grid_adapter=[1e-3, 3e-3]),
@@ -47,7 +48,7 @@ def parse_args(argv=None):
     p.add_argument('--preset', choices=PRESETS, default='default')
     p.add_argument('--config', type=Path, help='run: config.json of a single run')
     p.add_argument('--output', type=Path, help='results directory (preset default)')
-    p.add_argument('--report', type=Path, help='report path (preset default)')
+    p.add_argument('--readme', type=Path, help='README to update (default: README.md when --output is results/)')
     p.add_argument('--methods', nargs='+', choices=METHODS, default=list(METHODS))
     for name, kind in (('steps', int), ('batch_size', int), ('micro_batch_size', int), ('sequence_length', int),
                        ('eval_every', int), ('warmup_steps', int), ('checkpoint_every', int), ('timing_skip', int),
@@ -63,7 +64,7 @@ def parse_args(argv=None):
     for key, value in {**PRESETS[args.preset], **FIXED}.items():
         if getattr(args, key, None) is None:
             setattr(args, key, value)
-    args.output, args.report = ROOT / args.output, ROOT / args.report
+    args.output = ROOT / args.output
     if args.stage == 'run' and args.config is None:
         p.error('run needs --config')
     if args.sequence_length > 1024:
@@ -190,7 +191,8 @@ def hardware():
 def write_environment(args):
     """Record config, split metadata and hardware once per output directory (updated each invocation)."""
     _, split_meta = load_splits(())
-    config = {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items() if k not in ('stage', 'config')}
+    config = {k: (os.path.relpath(v, ROOT) if isinstance(v, Path) else v) for k, v in vars(args).items()
+              if k not in ('stage', 'config', 'readme')}
     env = {'config': config, 'data': split_meta,
            'model': {'name': 'GPT-2 small (124M)', 'weights': f'huggingface.co/{HF_REPO} model.safetensors'},
            'reproducibility': {
@@ -221,8 +223,9 @@ def main():
     if args.stage in ('all', 'test'):
         ok &= test(args)
     if args.stage in ('all', 'report'):
-        from analysis import write_report
-        write_report(args.output, args.report, smoke=args.preset == 'smoke')
+        from analysis import write_results
+        readme = args.readme or (ROOT / 'README.md' if args.output == ROOT / 'results' else None)
+        write_results(args.output, readme)
     if not ok:
         sys.exit('one or more runs failed or are missing; see the messages above and failed.json files')
 

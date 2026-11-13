@@ -1,8 +1,0 @@
-{
-  "checkpoint_step": 20,
-  "selected_by": "lowest validation loss",
-  "recorded_validation_loss": 3.7065927480396472,
-  "reloaded_validation_loss": 3.7065927480396472,
-  "test_loss": 3.591056878226144,
-  "test_perplexity": 36.27239117607763
-}
